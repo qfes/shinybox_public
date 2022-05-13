@@ -1,0 +1,149 @@
+#! /usr/bin/bash
+
+app_name=
+app_dir=.
+port=8080
+refresh_config=
+r_version=4.1.2
+renv_cache_dir=/usr/local/renv_cache
+docker_flags=""
+
+usage()
+{
+cat << EOF
+usage: runapp <app_name> [-d | --directory <.>] [-p | --port <8080>] [-r | --refresh-config] [-v | --version <latest>] [-f | --docker-flags <""> ]
+EOF
+}
+
+if [ "$1" == "" ]; then
+	usage
+	exit 1
+fi
+
+if [ -z $GITHUB_PAT ]; then
+  echo "Stopping runapp: GITHUB_PAT env var needs to be set to install R packages from GitHub"
+  exit 1
+fi
+
+app_name=$1
+shift # shift args down 1, e.g. $2 -> $1
+
+while [ "$1" != "" ]; do
+	case $1 in
+		-d | --dir )
+			shift
+			app_dir=$1
+			;;
+		-p | --port )
+			shift
+			port=$1
+			;;
+		-r | --refresh-config )
+		        refresh_config=1
+		        ;;
+		-h | --help )
+			usage
+			exit
+			;;
+		-v | --version )
+			shift
+			r_version=$1
+			;;
+		-f | --docker-flags)
+		  shift
+			docker_flags=$1
+			;;
+		* )
+			usage
+			exit 1
+
+	esac
+	shift
+done
+
+cache_dir=${SSD}/$app_name/_shiny/cache
+if [ ! -d ${cache_dir} ]; then
+  mkdir -p ${cache_dir}
+fi
+
+full_app_dir=`realpath ${app_dir}`
+
+if [ -z $SHINYBOX_SHINY_CACHE ]; 
+  then
+      echo "SHINYBOX_SHINY_CACHE env var not set using default ./_shiny/cache in app dir" 
+      shiny_cache_dir=${full_app_dir}/_shiny/cache
+  else
+      shiny_cache_dir=${SHINYBOX_SHINY_CACHE}/${app_name}/_shiny/cache
+fi
+if [ ! -d ${shiny_cache_dir} ]; then
+  mkdir -p ${shiny_cache_dir}
+fi
+
+conf_dir=${full_app_dir}/_shiny/config
+if [ ! -d ${conf_dir} ] || [ "$refresh_config" ]; then
+  mkdir -p ${conf_dir}
+cat <<EOF > ${conf_dir}/shiny-server.conf
+run_as shiny;
+
+# Define a top-level server which will listen on a port
+server {
+  # Instruct this server to listen on port 3838
+  listen 3838;
+
+  # Define the location available at the base URL
+  location / {
+
+    # Run this location in 'app_dir' mode, which will host a single Shiny
+    # Application available at '/srv/shiny-server/myApp'
+
+    app_dir /srv/shiny-server/app;
+    
+    # Define where we should put the log files for this location
+    log_dir /var/log/shiny-server;
+  }
+}
+
+EOF
+fi
+
+log_dir=${full_app_dir}/_shiny/logs
+if [ ! -d ${log_dir} ]; then
+  mkdir -p ${log_dir}
+fi
+
+# build the container
+echo "---------- BUILD CONTAINER ----------"
+sudo docker build /usr/share/shinybox/docker --build-arg R_VERSION=${r_version} --tag shinybox:${r_version}
+
+echo "---------- DEPLOY APP IN CONTAINER ----------"
+# launch the container
+sudo -E docker run --name "$app_name" \
+	           -p ${port}:3838 \
+						 ${docker_flags} \
+                   --mount source=${app_name}_shiny_r_lib,destination=/usr/local/lib/R/library \
+		   --mount type=bind,source=${log_dir},target=/var/log/shiny-server \
+		   --mount type=bind,source=${conf_dir},target=/etc/shiny-server \
+		   --mount type=bind,source=${full_app_dir},target=/srv/shiny-server/app \
+		   --mount source=${app_name}_shiny_data,destination=/var/lib/shiny-server \
+		   --mount source=shiny_dummy,destination=/srv/shiny-server/app/_shiny \
+		   --mount type=bind,source=${shiny_cache_dir},target=/srv/shiny-server/app/_shiny/cache \
+		   --mount type=bind,source=${renv_cache_dir},destination=${renv_cache_dir} \
+		   --env GITHUB_PAT=${GITHUB_PAT} \
+		   --env LIBARROW_MINIMAL=false \
+		   --env RENV_PATHS_CACHE=${renv_cache_dir} \
+		   --rm \
+                   -d shinybox:${r_version} 
+
+# make it so container's shiny user owns and can write inside this folder
+sudo -E docker exec ${app_name} bash -c "chown -R shiny:shiny /srv/shiny-server/app"
+sudo -E docker exec  ${app_name} bash -c "chmod o+x -R /srv/shiny-server/app"
+
+# if a lockfile exists in the app root, init renv and restore the library.
+if [ -f ${app_dir}/renv.lock ]; then
+  echo "---------- RESTORE APP RENV FROM LOCKFILE ----------"
+  sudo -E docker exec --workdir /srv/shiny-server/app ${app_name} Rscript -e "renv::consent(TRUE)"
+  sudo -E docker exec --workdir /srv/shiny-server/app ${app_name} Rscript -e "renv::init(bare = TRUE)"
+  sudo -E docker exec --workdir /srv/shiny-server/app ${app_name} Rscript -e "renv::restore(prompt = FALSE)"
+fi
+
+echo "Shiny app '${app_name}' deployed on http://localhost:${port}"
