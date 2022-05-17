@@ -4,7 +4,7 @@ app_name=
 app_dir=.
 port=8080
 refresh_config=
-r_version=4.1.2
+r_version=latest
 renv_cache_dir=/usr/local/renv_cache
 docker_flags=""
 
@@ -120,7 +120,6 @@ echo "---------- DEPLOY APP IN CONTAINER ----------"
 sudo -E docker run --name "$app_name" \
 	           -p ${port}:3838 \
 						 ${docker_flags} \
-                   --mount source=${app_name}_shiny_r_lib,destination=/usr/local/lib/R/library \
 		   --mount type=bind,source=${log_dir},target=/var/log/shiny-server \
 		   --mount type=bind,source=${conf_dir},target=/etc/shiny-server \
 		   --mount type=bind,source=${full_app_dir},target=/srv/shiny-server/app \
